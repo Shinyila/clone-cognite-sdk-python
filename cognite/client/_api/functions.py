@@ -15,8 +15,8 @@ from zipfile import ZipFile
 from cognite.client import utils
 from cognite.client._api_client import APIClient
 from cognite.client._constants import LIST_LIMIT_CEILING, LIST_LIMIT_DEFAULT
-from cognite.client.credentials import OAuthClientCredentials, Token
 from cognite.client.data_classes import (
+    ClientCredentials,
     Function,
     FunctionCall,
     FunctionCallList,
@@ -45,7 +45,7 @@ REQUIREMENTS_REG = re.compile(r"(\[\/?requirements\]){1}$", flags=re.M)  # Match
 UNCOMMENTED_LINE_REG = re.compile(r"^[^\#]]*.*")
 
 
-def _get_function_internal_id(_cognite_client: CogniteClient, identifier: SingletonIdentifierSequence) -> int:
+def _get_function_internal_id(cognite_client: CogniteClient, identifier: SingletonIdentifierSequence) -> int:
     id_object = identifier[0]
     id_dict = id_object.as_dict()
 
@@ -53,7 +53,7 @@ def _get_function_internal_id(_cognite_client: CogniteClient, identifier: Single
         return id_object.as_primitive()
 
     if "externalId" in id_dict:
-        function = _cognite_client.functions.retrieve(external_id=id_object.as_primitive())
+        function = cognite_client.functions.retrieve(external_id=id_object.as_primitive())
         if function:
             return function.id
 
@@ -386,14 +386,7 @@ class FunctionsAPI(APIClient):
         """
         identifier = IdentifierSequence.load(ids=id, external_ids=external_id).as_singleton()
         id = _get_function_internal_id(self._cognite_client, identifier)
-
-        # Case 1: Client credentials inferred from the instantiated client.
-        # Case 2: Token on behalf of the user. We use token exchange.
-        nonce = None
-        if _using_client_credential_flow(self._cognite_client):
-            nonce = _use_client_credentials(self._cognite_client, client_credentials=None)
-        elif _using_token_exchange_flow(self._cognite_client):
-            nonce = _use_token_exchange(self._cognite_client)
+        nonce = _create_new_session_and_return_nonce(self._cognite_client)
 
         if data is None:
             data = {}
@@ -541,62 +534,17 @@ class FunctionsAPI(APIClient):
         return FunctionsStatus._load(res.json())
 
 
-def _use_client_credentials(
+def _create_new_session_and_return_nonce(
     cognite_client: CogniteClient,
-    client_credentials: Optional[Dict] = None,
+    client_credentials: Union[Dict, ClientCredentials, None] = None,
 ) -> str:
-    """
-    If client_credentials is passed, will use those, otherwise will implicitly use those the client was instantiated
-    with
-    Args:
-        client_credentials: a dictionary containing:
-            client_id
-            client_secret
-
-    Returns:
-        nonce (optional, str): a nonce if able to obtain, otherwise raises CogniteAPIError.
-
-    """
-
-    if client_credentials:
-        client_id = client_credentials["client_id"]
-        client_secret = client_credentials["client_secret"]
-    else:
-        assert isinstance(cognite_client.config.credentials, OAuthClientCredentials)
-        client_id = cognite_client.config.credentials.client_id
-        client_secret = cognite_client.config.credentials.client_secret
-
-    session_url = f"/api/v1/projects/{cognite_client.config.project}/sessions"
-    payload = {"items": [{"clientId": client_id, "clientSecret": client_secret}]}
+    if isinstance(client_credentials, dict):
+        client_credentials = ClientCredentials(client_credentials["client_id"], client_credentials["client_secret"])
     try:
-        res = cognite_client.post(session_url, json=payload)
-        nonce = res.json()["items"][0]["nonce"]
-        return nonce
+        new_session = cognite_client.iam.sessions.create(client_credentials)
+        return cast(str, new_session.nonce)
     except CogniteAPIError as e:
-        raise CogniteAPIError("Failed to create session using client credentials flow.", 403) from e
-
-
-def _use_token_exchange(
-    cognite_client: CogniteClient,
-) -> str:
-    session_url = f"/api/v1/projects/{cognite_client.config.project}/sessions"
-    payload = {"items": [{"tokenExchange": True}]}
-    try:
-        res = cognite_client.post(url=session_url, json=payload)
-        nonce = res.json()["items"][0]["nonce"]
-        return nonce
-    except CogniteAPIError as e:
-        raise CogniteAPIError("Failed to create session using token exchange flow.", 403) from e
-
-
-def _using_token_exchange_flow(cognite_client: CogniteClient) -> bool:
-    """Determine whether the Cognite client is configured with a token or token factory."""
-    return isinstance(cognite_client.config.credentials, Token)
-
-
-def _using_client_credential_flow(cognite_client: CogniteClient) -> bool:
-    """Determine whether the Cognite client is configured for client-credential flow."""
-    return isinstance(cognite_client.config.credentials, OAuthClientCredentials)
+        raise CogniteAPIError("Failed to create a new session.", 403) from e
 
 
 def convert_file_path_to_module_path(file_path: str) -> str:
@@ -1000,7 +948,7 @@ class FunctionSchedulesAPI(APIClient):
         cron_expression: str,
         function_id: Optional[int] = None,
         function_external_id: Optional[str] = None,
-        client_credentials: Optional[Dict] = None,
+        client_credentials: Union[Dict, ClientCredentials, None] = None,
         description: str = "",
         data: Optional[Dict] = None,
     ) -> FunctionSchedule:
@@ -1012,7 +960,7 @@ class FunctionSchedulesAPI(APIClient):
             function_external_id (optional, str): External id of the function. This is deprecated and cannot be used together with client_credentials.
             description (str): Description of the schedule.
             cron_expression (str): Cron expression.
-            client_credentials: (optional, Dict): Dictionary containing client credentials:
+            client_credentials: (optional, ClientCredentials, Dict): Instance of ClientCredentials or a dictionary containing client credentials:
                 client_id
                 client_secret
             data (optional, Dict): Data to be passed to the scheduled run. **WARNING:** Secrets or other confidential information should not be passed via this argument. There is a dedicated `secrets` argument in FunctionsAPI.create() for this purpose.
@@ -1025,12 +973,13 @@ class FunctionSchedulesAPI(APIClient):
             Create function schedule::
 
                 >>> from cognite.client import CogniteClient
+                >>> from cognite.client.data_classes import ClientCredentials
                 >>> c = CogniteClient()
                 >>> schedule = c.functions.schedules.create(
                 ...     name= "My schedule",
                 ...     function_id=123,
                 ...     cron_expression="*/5 * * * *",
-                ...     client_credentials={"client_id": "...", "client_secret": "..."},
+                ...     client_credentials=ClientCredentials("my-client-id", "my-client-secret"),
                 ...     description="This schedule does magic stuff."
                 ... )
 
@@ -1038,9 +987,10 @@ class FunctionSchedulesAPI(APIClient):
         _get_function_identifier(function_id, function_external_id)
 
         nonce = None
-        if client_credentials:
-            assert function_id is not None, "function_id must be set when creating a schedule with client_credentials."
-            nonce = _use_client_credentials(self._cognite_client, client_credentials)
+        if client_credentials is not None:
+            if function_id is not None:
+                raise ValueError("When passing 'client_credentials', 'function_id' must be set")
+            nonce = _create_new_session_and_return_nonce(self._cognite_client, client_credentials)
 
         body: Dict[str, List[Dict[str, Union[str, int, None, Dict]]]] = {
             "items": [
