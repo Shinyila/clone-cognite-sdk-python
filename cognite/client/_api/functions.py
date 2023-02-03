@@ -489,14 +489,15 @@ class FunctionsAPI(APIClient):
         folder: Optional[str], file_id: Optional[int], function_handle: Optional[Callable[..., Any]]
     ) -> None:
         source_code_options = {"folder": folder, "file_id": file_id, "function_handle": function_handle}
-        given_source_code_options = [key for key in source_code_options.keys() if source_code_options[key]]
+        given_source_code_options = [k for k, v in source_code_options.items() if v is not None]
         if len(given_source_code_options) < 1:
-            raise TypeError("Exactly one of the arguments folder, file_id and handle is required, but none were given.")
+            raise TypeError(
+                f"Exactly one of the arguments {list(source_code_options)} is required, but none were given."
+            )
         elif len(given_source_code_options) > 1:
             raise TypeError(
-                "Exactly one of the arguments folder, file_id and handle is required, but "
-                + ", ".join(given_source_code_options)
-                + " were given."
+                f"Exactly one of the arguments {list(source_code_options)} is required, but "
+                f"{given_source_code_options} were given."
             )
 
     def activate(self) -> FunctionsStatus:
