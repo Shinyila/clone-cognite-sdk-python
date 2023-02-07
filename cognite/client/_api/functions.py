@@ -989,7 +989,7 @@ class FunctionSchedulesAPI(APIClient):
 
         nonce = None
         if client_credentials is not None:
-            if function_id is not None:
+            if function_id is None:
                 raise ValueError("When passing 'client_credentials', 'function_id' must be set")
             nonce = _create_new_session_and_return_nonce(self._cognite_client, client_credentials)
 
