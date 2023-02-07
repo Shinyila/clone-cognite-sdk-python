@@ -908,7 +908,7 @@ class TestFunctionSchedulesAPI:
         assert expected == res.dump(camel_case=True)
 
     def test_create_schedules_with_function_external_id_and_client_credentials_raises(self, cognite_client):
-        with pytest.raises(AssertionError) as excinfo:
+        with pytest.raises(ValueError, match="When passing 'client_credentials', 'function_id' must be set"):
             cognite_client.functions.schedules.create(
                 name="my-schedule",
                 function_external_id="user/hello-cognite/hello-cognite:latest",
@@ -916,7 +916,6 @@ class TestFunctionSchedulesAPI:
                 description="Hi",
                 client_credentials={"client_id": "aabbccdd", "client_secret": "xxyyzz"},
             )
-        assert "function_id must be set when creating a schedule with client_credentials." in str(excinfo.value)
 
     def test_create_schedules_with_function_id_and_function_external_id_raises(self, cognite_client):
         with pytest.raises(AssertionError) as excinfo:
